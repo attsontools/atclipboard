@@ -16,10 +16,12 @@ pub use protocol::{
     SERVICE_API,
 };
 pub use server::ServiceServer;
-pub use service::ClipboardService;
+pub use service::{ClipboardBackend, ClipboardService, ClipboardShortcutStatus};
 pub use service_cli::{parse_service_args, ServiceRunOptions};
 pub use standalone_service::StandaloneService;
-pub use storage::{ClipboardHistoryItem, ClipboardItemKind, ClipboardStore, TakeoverOutcome};
+pub use storage::{
+    ClipboardHistoryItem, ClipboardItemKind, ClipboardSettings, ClipboardStore, TakeoverOutcome,
+};
 pub use supervisor::{
     CommandServiceLauncher, ServiceLaunchSpec, ServiceLauncher, ServiceProcess, ServiceSupervisor,
     ServiceSupervisorError,

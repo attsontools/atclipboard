@@ -5,7 +5,7 @@ use rusqlite::Connection;
 use serde_json::json;
 
 #[tokio::test]
-async fn real_transport_handshakes_and_lists_existing_history_without_paths() {
+async fn real_transport_exposes_the_bounded_eight_method_contract() {
     let temporary = tempfile::tempdir().unwrap();
     let data = temporary.path().join("clipboard");
     seed_text_history(&data);
@@ -30,6 +30,64 @@ async fn real_transport_handshakes_and_lists_existing_history_without_paths() {
     assert_eq!(result["items"][0]["contentText"], "hello clipboard");
     assert!(result["nextCursor"].is_null());
     assert!(!result.to_string().contains("assetPath"));
+
+    let pinned = client
+        .request(
+            "clipboard.history.pin",
+            json!({ "id": "clip-text", "isPinned": true }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(pinned["isPinned"], true);
+    let item = client
+        .request("clipboard.history.get", json!({ "id": "clip-text" }))
+        .await
+        .unwrap();
+    assert_eq!(item["contentText"], "hello clipboard");
+
+    let settings = client
+        .request("clipboard.settings.get", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(settings["retentionLimit"], 500);
+    let settings = client
+        .request(
+            "clipboard.settings.update",
+            json!({
+                "settings": {
+                    "captureEnabled": false,
+                    "retentionLimit": 50,
+                    "shortcut": "CommandOrControl+Alt+V"
+                }
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(settings["captureEnabled"], false);
+
+    let restore_error = client
+        .request("clipboard.history.restore", json!({ "id": "clip-text" }))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        restore_error.code,
+        "CLIPBOARD_SERVICE_CLIPBOARD_WRITE_FAILED"
+    );
+    let cleared = client
+        .request("clipboard.history.clearUnpinned", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(cleared["deletedCount"], 0);
+    let deleted = client
+        .request("clipboard.history.delete", json!({ "id": "clip-text" }))
+        .await
+        .unwrap();
+    assert_eq!(deleted["deleted"], true);
+    let missing = client
+        .request("clipboard.history.get", json!({ "id": "clip-text" }))
+        .await
+        .unwrap_err();
+    assert_eq!(missing.code, "CLIPBOARD_SERVICE_ITEM_NOT_FOUND");
 
     drop(client);
     stop.notify_one();

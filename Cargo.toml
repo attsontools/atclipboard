@@ -8,6 +8,7 @@ name = "atclipboard_service"
 path = "src/lib.rs"
 
 [dependencies]
+base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 fs2 = "0.4"
 image = "0.25"
