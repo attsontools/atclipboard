@@ -18,6 +18,7 @@ const REQUIRED_CAPABILITIES = [
   'host.ui.auxiliary',
   'host.clipboard.history',
 ] as const;
+const PLUGIN_HISTORY_COMMAND = 'attool --plugin-window com.attson.clipboard/history';
 
 interface PluginHandshake {
   theme: ThemeName;
@@ -124,10 +125,12 @@ export function createPluginRuntime(connectPlugin: ConnectPlugin): {
       await request('clipboard.history.restore', { id });
     },
     getSettings() {
-      return request<ClipboardSettingsState>('clipboard.settings.get', {});
+      return request<ClipboardSettingsState>('clipboard.settings.get', {})
+        .then(withPluginShortcutCommand);
     },
     updateSettings(settings: ClipboardSettings) {
-      return request<ClipboardSettingsState>('clipboard.settings.update', { settings });
+      return request<ClipboardSettingsState>('clipboard.settings.update', { settings })
+        .then(withPluginShortcutCommand);
     },
     async onHistoryChanged(listener) {
       await connect();
@@ -174,6 +177,11 @@ export function createPluginRuntime(connectPlugin: ConnectPlugin): {
   };
 
   return { adapter, themeBridge };
+}
+
+function withPluginShortcutCommand(settings: ClipboardSettingsState): ClipboardSettingsState {
+  if (!settings.systemShortcutCommand) return settings;
+  return { ...settings, systemShortcutCommand: PLUGIN_HISTORY_COMMAND };
 }
 
 function isHistoryChanged(value: unknown) {

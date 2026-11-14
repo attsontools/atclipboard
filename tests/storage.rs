@@ -1,4 +1,8 @@
-use std::fs::{self, OpenOptions};
+use std::{
+    collections::BTreeMap,
+    fs::{self, OpenOptions},
+    path::{Path, PathBuf},
+};
 
 use atclipboard_service::{ClipboardItemKind, ClipboardStore, ServiceError, TakeoverOutcome};
 use fs2::FileExt;
@@ -95,6 +99,30 @@ fn takeover_rejects_incomplete_settings_without_claiming_the_data() {
 
     assert_eq!(error.code, "CLIPBOARD_SERVICE_DATA_INVALID");
     assert!(!data.join("clipboard-takeover.json").exists());
+}
+
+#[test]
+fn empty_legacy_settings_use_defaults_without_rewriting_the_database() {
+    let temporary = tempfile::tempdir().unwrap();
+    let data = temporary.path().join("clipboard");
+    seed_legacy_data(&data);
+    let connection = Connection::open(data.join("clipboard_history.sqlite3")).unwrap();
+    connection
+        .execute("DELETE FROM clipboard_settings", [])
+        .unwrap();
+    drop(connection);
+    fs::write(data.join("clipboard-takeover-capability-v1"), b"1\n").unwrap();
+    let database_before = fs::read(data.join("clipboard_history.sqlite3")).unwrap();
+
+    let (store, outcome) = ClipboardStore::open(&data).unwrap();
+
+    assert!(matches!(outcome, TakeoverOutcome::TakenOver { .. }));
+    assert_eq!(store.load_settings().unwrap(), Default::default());
+    drop(store);
+    assert_eq!(
+        fs::read(data.join("clipboard_history.sqlite3")).unwrap(),
+        database_before
+    );
 }
 
 #[test]
@@ -266,7 +294,142 @@ fn owned_marker_without_a_nonce_is_rejected() {
     assert_eq!(error.code, "CLIPBOARD_SERVICE_DATA_INVALID");
 }
 
-fn seed_legacy_data(data: &std::path::Path) {
+#[test]
+#[ignore = "requires ATCLIPBOARD_REAL_DATA_COPY"]
+fn real_legacy_copy_takeover_preserves_database_and_assets_byte_for_byte() {
+    let data = PathBuf::from(
+        std::env::var("ATCLIPBOARD_REAL_DATA_COPY")
+            .expect("ATCLIPBOARD_REAL_DATA_COPY is required"),
+    );
+    assert!(
+        data.join("real-data-copy-only").is_file(),
+        "real data verification is restricted to an explicit copy"
+    );
+    assert!(data.join("clipboard-takeover-capability-v1").is_file());
+    let before = RealDataSnapshot::read(&data);
+
+    let (store, outcome) = ClipboardStore::open(&data).unwrap();
+
+    assert_eq!(
+        outcome,
+        TakeoverOutcome::TakenOver {
+            items: before.item_count as u64,
+            assets: before.image_count as u64,
+        }
+    );
+    drop(store);
+    assert_eq!(marker_state(&data), "owned");
+    assert_eq!(RealDataSnapshot::read(&data), before);
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct RealDataSnapshot {
+    database: Vec<u8>,
+    table_count: i64,
+    item_count: i64,
+    pinned_count: i64,
+    image_count: i64,
+    counts_by_kind: Vec<(String, i64)>,
+    settings: Vec<(String, String)>,
+    asset_paths: Vec<String>,
+    assets: BTreeMap<String, Vec<u8>>,
+}
+
+impl RealDataSnapshot {
+    fn read(data: &Path) -> Self {
+        let database_path = data.join("clipboard_history.sqlite3");
+        let connection =
+            Connection::open_with_flags(&database_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap();
+        let table_count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let item_count = count(&connection, "SELECT COUNT(*) FROM clipboard_items");
+        let pinned_count = count(
+            &connection,
+            "SELECT COUNT(*) FROM clipboard_items WHERE is_pinned != 0",
+        );
+        let image_count = count(
+            &connection,
+            "SELECT COUNT(*) FROM clipboard_items WHERE kind = 'image'",
+        );
+        let counts_by_kind = string_i64_rows(
+            &connection,
+            "SELECT kind, COUNT(*) FROM clipboard_items GROUP BY kind ORDER BY kind",
+        );
+        let settings = string_rows(
+            &connection,
+            "SELECT key, value FROM clipboard_settings ORDER BY key",
+        );
+        let asset_paths = string_column(
+            &connection,
+            "SELECT asset_path FROM clipboard_items WHERE asset_path IS NOT NULL ORDER BY id",
+        );
+        drop(connection);
+
+        let mut assets = BTreeMap::new();
+        for entry in fs::read_dir(data.join("assets")).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_file() {
+                assets.insert(
+                    entry.file_name().to_string_lossy().into_owned(),
+                    fs::read(entry.path()).unwrap(),
+                );
+            }
+        }
+        Self {
+            database: fs::read(database_path).unwrap(),
+            table_count,
+            item_count,
+            pinned_count,
+            image_count,
+            counts_by_kind,
+            settings,
+            asset_paths,
+            assets,
+        }
+    }
+}
+
+fn count(connection: &Connection, sql: &str) -> i64 {
+    connection.query_row(sql, [], |row| row.get(0)).unwrap()
+}
+
+fn string_i64_rows(connection: &Connection, sql: &str) -> Vec<(String, i64)> {
+    connection
+        .prepare(sql)
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+fn string_rows(connection: &Connection, sql: &str) -> Vec<(String, String)> {
+    connection
+        .prepare(sql)
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+fn string_column(connection: &Connection, sql: &str) -> Vec<String> {
+    connection
+        .prepare(sql)
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+fn seed_legacy_data(data: &Path) {
     fs::create_dir_all(data.join("assets")).unwrap();
     let asset_path = data.join("assets/clip-image.png");
     RgbaImage::from_pixel(2, 2, Rgba([52, 211, 153, 255]))
@@ -318,13 +481,13 @@ fn seed_legacy_data(data: &std::path::Path) {
         .unwrap();
 }
 
-fn marker_state(data: &std::path::Path) -> String {
+fn marker_state(data: &Path) -> String {
     let marker: serde_json::Value =
         serde_json::from_slice(&fs::read(data.join("clipboard-takeover.json")).unwrap()).unwrap();
     marker["state"].as_str().unwrap().to_string()
 }
 
-fn write_marker(data: &std::path::Path, state: &str) {
+fn write_marker(data: &Path, state: &str) {
     fs::write(
         data.join("clipboard-takeover.json"),
         format!(
@@ -334,7 +497,7 @@ fn write_marker(data: &std::path::Path, state: &str) {
     .unwrap();
 }
 
-fn open_error(data: &std::path::Path) -> ServiceError {
+fn open_error(data: &Path) -> ServiceError {
     match ClipboardStore::open(data) {
         Ok(_) => panic!("takeover must fail"),
         Err(error) => error,

@@ -17,10 +17,10 @@ describe('clipboard plugin runtime', () => {
           captureEnabled: true,
           retentionLimit: 500,
           shortcut: 'CommandOrControl+Alt+V',
-          shortcutRegistered: true,
-          shortcutRegisterError: null,
-          unavailableReason: null,
-          systemShortcutCommand: null,
+          shortcutRegistered: false,
+          shortcutRegisterError: 'Wayland does not expose global shortcuts',
+          unavailableReason: 'Use a desktop custom shortcut',
+          systemShortcutCommand: 'atclipboard --history',
         };
       }
       return {};
@@ -57,7 +57,7 @@ describe('clipboard plugin runtime', () => {
     await runtime.adapter.onWindowActivation('preview', activated);
     await runtime.themeBridge.listen((theme) => themes.push(theme));
     await runtime.adapter.list({ kind: 'image', query: 'shot', cursor: null, limit: 50 });
-    await runtime.adapter.getSettings();
+    const settings = await runtime.adapter.getSettings();
     await runtime.adapter.openWindow('preview', { id: 'clip-7' });
     await runtime.adapter.closeWindow('preview');
     notifications.get('host.clipboard.historyChanged')?.({
@@ -78,6 +78,9 @@ describe('clipboard plugin runtime', () => {
       method: 'clipboard.settings.get',
       params: {},
     });
+    expect(settings.systemShortcutCommand).toBe(
+      'attool --plugin-window com.attson.clipboard/history',
+    );
     expect(call).toHaveBeenCalledWith('host.ui.open', {
       windowId: 'preview',
       payload: { id: 'clip-7' },

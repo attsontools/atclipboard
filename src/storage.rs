@@ -88,6 +88,16 @@ pub struct ClipboardSettings {
     pub shortcut: String,
 }
 
+impl Default for ClipboardSettings {
+    fn default() -> Self {
+        Self {
+            capture_enabled: true,
+            retention_limit: 500,
+            shortcut: "CommandOrControl+Alt+V".to_string(),
+        }
+    }
+}
+
 pub struct ClipboardStore {
     root_dir: PathBuf,
     db_path: PathBuf,
@@ -384,34 +394,7 @@ impl ClipboardStore {
 
     pub fn load_settings(&self) -> Result<ClipboardSettings, ServiceError> {
         let connection = Connection::open(&self.db_path).map_err(storage_sql_error)?;
-        let setting = |key: &str| -> Result<String, ServiceError> {
-            connection
-                .query_row(
-                    "SELECT value FROM clipboard_settings WHERE key = ?1",
-                    params![key],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(storage_sql_error)?
-                .ok_or_else(|| data_error("clipboard settings are incomplete"))
-        };
-        let capture_enabled = match setting("capture_enabled")?.as_str() {
-            "1" => true,
-            "0" => false,
-            _ => return Err(data_error("clipboard capture setting is invalid")),
-        };
-        let retention_limit = setting("retention_limit")?
-            .parse::<usize>()
-            .map_err(|_| data_error("clipboard retention setting is invalid"))?;
-        let shortcut = setting("shortcut")?;
-        if shortcut.trim().is_empty() {
-            return Err(data_error("clipboard shortcut setting is invalid"));
-        }
-        Ok(ClipboardSettings {
-            capture_enabled,
-            retention_limit,
-            shortcut,
-        })
+        read_settings(&connection)
     }
 
     pub fn save_settings(&self, settings: &ClipboardSettings) -> Result<(), ServiceError> {
@@ -799,30 +782,9 @@ fn validate_database(root_dir: &Path, db_path: &Path) -> Result<(u64, u64), Serv
         ],
     )?;
     validate_table_columns(&connection, "clipboard_settings", &["key", "value"])?;
-    let setting = |key: &str| -> Result<String, ServiceError> {
-        connection
-            .query_row(
-                "SELECT value FROM clipboard_settings WHERE key = ?1",
-                params![key],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(storage_sql_error)?
-            .ok_or_else(|| data_error(format!("clipboard setting {key} is missing")))
-    };
-    if !matches!(setting("capture_enabled")?.as_str(), "0" | "1") {
-        return Err(data_error("clipboard capture_enabled setting is invalid"));
-    }
-    if setting("retention_limit")?
-        .parse::<usize>()
-        .ok()
-        .filter(|limit| *limit > 0)
-        .is_none()
-    {
+    let settings = read_settings(&connection)?;
+    if settings.retention_limit == 0 {
         return Err(data_error("clipboard retention_limit setting is invalid"));
-    }
-    if setting("shortcut")?.trim().is_empty() {
-        return Err(data_error("clipboard shortcut setting is invalid"));
     }
     let root = root_dir.canonicalize().map_err(storage_io_error)?;
     let assets_root = root_dir
@@ -877,6 +839,47 @@ fn validate_database(root_dir: &Path, db_path: &Path) -> Result<(u64, u64), Serv
         items += 1;
     }
     Ok((items, assets))
+}
+
+fn read_settings(connection: &Connection) -> Result<ClipboardSettings, ServiceError> {
+    let mut values = Vec::new();
+    for key in ["capture_enabled", "retention_limit", "shortcut"] {
+        values.push(
+            connection
+                .query_row(
+                    "SELECT value FROM clipboard_settings WHERE key = ?1",
+                    params![key],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(storage_sql_error)?,
+        );
+    }
+    if values.iter().all(Option::is_none) {
+        return Ok(ClipboardSettings::default());
+    }
+    if values.iter().any(Option::is_none) {
+        return Err(data_error("clipboard settings are incomplete"));
+    }
+    let capture_enabled = match values[0].as_deref() {
+        Some("1") => true,
+        Some("0") => false,
+        _ => return Err(data_error("clipboard capture setting is invalid")),
+    };
+    let retention_limit = values[1]
+        .as_deref()
+        .unwrap_or_default()
+        .parse::<usize>()
+        .map_err(|_| data_error("clipboard retention setting is invalid"))?;
+    let shortcut = values[2].clone().unwrap_or_default();
+    if shortcut.trim().is_empty() {
+        return Err(data_error("clipboard shortcut setting is invalid"));
+    }
+    Ok(ClipboardSettings {
+        capture_enabled,
+        retention_limit,
+        shortcut,
+    })
 }
 
 fn validate_table_columns(
