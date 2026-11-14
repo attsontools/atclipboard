@@ -1,17 +1,16 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue';
+import { adapter, themeBridge } from '@runtime-host';
 
 import ClipboardItemCard from '../components/ClipboardItemCard.vue';
 import StateView from '../components/StateView.vue';
 import { createClipboardStore } from '../frontend/clipboardStore';
 import { messageFromUnknown } from '../frontend/errors';
-import { createStandaloneAdapter } from '../frontend/standaloneAdapter';
 import { createThemeController } from '../frontend/theme';
 import type { ClipboardFilterKind } from '../frontend/types';
 
-const adapter = createStandaloneAdapter();
 const store = createClipboardStore(adapter);
-const theme = createThemeController();
+const theme = createThemeController(themeBridge);
 const searchDraft = ref('');
 const rail = ref<HTMLElement | null>(null);
 const notice = ref('');

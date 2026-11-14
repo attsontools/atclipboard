@@ -4,6 +4,9 @@
     "useDefineForClassFields": true,
     "module": "ESNext",
     "moduleResolution": "Bundler",
+    "paths": {
+      "@runtime-host": ["./src/frontend/standaloneRuntime.ts"]
+    },
     "strict": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,

@@ -1,14 +1,11 @@
-import { emit, listen } from '@tauri-apps/api/event';
 import { ref } from 'vue';
 
 import type { ThemeName, Unlisten } from './types';
 
 export type { ThemeName } from './types';
 
-const STORAGE_KEY = 'atclipboard.theme';
-const THEME_EVENT = 'clipboard://theme-changed';
-
 export interface ThemeBridge {
+  mutable: boolean;
   read(): ThemeName;
   write(theme: ThemeName): void;
   apply(theme: ThemeName): void;
@@ -16,27 +13,7 @@ export interface ThemeBridge {
   listen(handler: (theme: ThemeName) => void): Promise<Unlisten>;
 }
 
-const browserBridge: ThemeBridge = {
-  read() {
-    return localStorage.getItem(STORAGE_KEY) === 'light' ? 'light' : 'dark';
-  },
-  write(theme) {
-    localStorage.setItem(STORAGE_KEY, theme);
-  },
-  apply(theme) {
-    document.documentElement.dataset.theme = theme;
-  },
-  broadcast(theme) {
-    return emit(THEME_EVENT, theme);
-  },
-  async listen(handler) {
-    return listen<ThemeName>(THEME_EVENT, ({ payload }) => {
-      if (payload === 'dark' || payload === 'light') handler(payload);
-    });
-  },
-};
-
-export function createThemeController(bridge: ThemeBridge = browserBridge) {
+export function createThemeController(bridge: ThemeBridge) {
   const theme = ref<ThemeName>(bridge.read());
   let unlisten: Unlisten | null = null;
 
@@ -50,6 +27,7 @@ export function createThemeController(bridge: ThemeBridge = browserBridge) {
   }
 
   async function toggle() {
+    if (!bridge.mutable) return;
     const next = theme.value === 'dark' ? 'light' : 'dark';
     theme.value = next;
     bridge.write(next);
@@ -62,5 +40,5 @@ export function createThemeController(bridge: ThemeBridge = browserBridge) {
     unlisten = null;
   }
 
-  return { theme, start, toggle, destroy };
+  return { theme, canToggle: bridge.mutable, start, toggle, destroy };
 }

@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@attson/plugin-sdk':
+        specifier: file:../attool-plugin-sdk
+        version: file:../attool-plugin-sdk
       '@tauri-apps/api':
         specifier: 2.12.3
         version: 2.12.3
@@ -35,6 +38,10 @@ importers:
         version: 4.1.5(vite@8.0.10)
 
 packages:
+
+  '@attson/plugin-sdk@file:../attool-plugin-sdk':
+    resolution: {directory: ../attool-plugin-sdk, type: directory}
+    engines: {node: '>=22.6'}
 
   '@babel/helper-string-parser@7.29.14':
     resolution: {integrity: sha512-CXvKMFvM80ihI7Vox9jb+kQjnyjESQNPM+vB7U0Zz6TWuZA+Z/FL0QPMH300h33qJtIx+REeBhXqWOPW48TcAQ==}
@@ -702,6 +709,8 @@ packages:
     hasBin: true
 
 snapshots:
+
+  '@attson/plugin-sdk@file:../attool-plugin-sdk': {}
 
   '@babel/helper-string-parser@7.29.14': {}
 

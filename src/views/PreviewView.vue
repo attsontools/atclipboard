@@ -1,15 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { adapter, themeBridge } from '@runtime-host';
 
 import StateView from '../components/StateView.vue';
 import { createClipboardStore } from '../frontend/clipboardStore';
 import { messageFromUnknown } from '../frontend/errors';
-import { createStandaloneAdapter } from '../frontend/standaloneAdapter';
 import { createThemeController } from '../frontend/theme';
 
-const adapter = createStandaloneAdapter();
 const store = createClipboardStore(adapter);
-const theme = createThemeController();
+const theme = createThemeController(themeBridge);
 const notice = ref('');
 
 const kindLabel = computed(() => ({ text: '文本', image: '图片', files: '文件' }[store.previewItem.value?.kind ?? 'text']));

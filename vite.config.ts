@@ -3,9 +3,19 @@ import vue from '@vitejs/plugin-vue';
 import { fileURLToPath, URL } from 'node:url';
 import { defineConfig } from 'vite';
 
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   base: './',
   plugins: [vue()],
+  resolve: {
+    alias: {
+      '@runtime-host': fileURLToPath(new URL(
+        mode === 'plugin'
+          ? './src/frontend/pluginEntry.ts'
+          : './src/frontend/standaloneRuntime.ts',
+        import.meta.url,
+      )),
+    },
+  },
   server: { strictPort: true, host: '127.0.0.1', port: 1429 },
   build: {
     target: 'es2022',
@@ -18,4 +28,4 @@ export default defineConfig({
     },
   },
   test: { exclude: ['**/node_modules/**', '**/dist/**'] }
-});
+}));

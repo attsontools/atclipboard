@@ -7,6 +7,7 @@ describe('theme controller', () => {
   it('restores, persists and synchronizes the theme across windows', async () => {
     let listener: ((theme: ThemeName) => void) | undefined;
     const bridge: ThemeBridge = {
+      mutable: true,
       read: vi.fn(() => 'light' as const),
       write: vi.fn(),
       apply: vi.fn(),
