@@ -1,6 +1,12 @@
-use std::fs;
+use std::{
+    fs,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+};
 
-use atclipboard_service::{ServiceClient, ServiceServer};
+use atclipboard_service::{ClipboardBackend, ClipboardServiceEvent, ServiceClient, ServiceServer};
 use rusqlite::Connection;
 use serde_json::json;
 
@@ -11,9 +17,14 @@ async fn real_transport_exposes_the_bounded_eight_method_contract() {
     seed_text_history(&data);
     fs::write(data.join("clipboard-takeover-capability-v1"), b"1\n").unwrap();
     let endpoint = data.join("service.endpoint.json");
-    let server = ServiceServer::bind(endpoint.clone(), data.clone(), "0.1.0-alpha.0")
-        .await
-        .unwrap();
+    let server = ServiceServer::bind_with_backend(
+        endpoint.clone(),
+        data.clone(),
+        "0.1.0-alpha.0",
+        Arc::new(UnavailableTestBackend),
+    )
+    .await
+    .unwrap();
     let stop = server.stop_handle();
     let task = tokio::spawn(server.run());
     let client = ServiceClient::connect(&endpoint, &data, "transport-test")
@@ -94,6 +105,185 @@ async fn real_transport_exposes_the_bounded_eight_method_contract() {
     task.await.unwrap().unwrap();
     assert!(!endpoint.exists());
     assert!(!data.join("service.lock").exists());
+}
+
+#[tokio::test]
+async fn all_clients_receive_content_free_history_events_with_monotonic_revisions() {
+    let temporary = tempfile::tempdir().unwrap();
+    let data = temporary.path().join("clipboard");
+    seed_text_history(&data);
+    fs::write(data.join("clipboard-takeover-capability-v1"), b"1\n").unwrap();
+    let endpoint = data.join("service.endpoint.json");
+    let server = ServiceServer::bind(endpoint.clone(), data.clone(), "0.1.0-alpha.0")
+        .await
+        .unwrap();
+    let stop = server.stop_handle();
+    let task = tokio::spawn(server.run());
+    let first = ServiceClient::connect(&endpoint, &data, "first-client")
+        .await
+        .unwrap();
+    let second = ServiceClient::connect(&endpoint, &data, "second-client")
+        .await
+        .unwrap();
+    let mut first_events = first.subscribe();
+    let mut second_events = second.subscribe();
+
+    first
+        .request(
+            "clipboard.history.pin",
+            json!({ "id": "clip-text", "isPinned": true }),
+        )
+        .await
+        .unwrap();
+
+    for receiver in [&mut first_events, &mut second_events] {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event, ClipboardServiceEvent::HistoryChanged { revision: 1 });
+        let serialized = serde_json::to_string(&event).unwrap();
+        assert!(!serialized.contains("content"));
+        assert!(!serialized.contains("path"));
+    }
+
+    second
+        .request(
+            "clipboard.history.pin",
+            json!({ "id": "clip-text", "isPinned": false }),
+        )
+        .await
+        .unwrap();
+    for receiver in [&mut first_events, &mut second_events] {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event, ClipboardServiceEvent::HistoryChanged { revision: 2 });
+    }
+
+    drop(first);
+    drop(second);
+    stop.notify_one();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn one_background_watcher_serves_all_connected_clients() {
+    let temporary = tempfile::tempdir().unwrap();
+    let data = temporary.path().join("clipboard");
+    let endpoint = data.join("service.endpoint.json");
+    let backend = Arc::new(BackgroundTextBackend {
+        reads: AtomicUsize::new(0),
+    });
+    let server = ServiceServer::bind_with_backend(
+        endpoint.clone(),
+        data.clone(),
+        "0.1.0-alpha.0",
+        backend.clone(),
+    )
+    .await
+    .unwrap();
+    let stop = server.stop_handle();
+    let task = tokio::spawn(server.run());
+    let first = ServiceClient::connect(&endpoint, &data, "first-client")
+        .await
+        .unwrap();
+    let second = ServiceClient::connect(&endpoint, &data, "second-client")
+        .await
+        .unwrap();
+    let mut first_events = first.subscribe();
+    let mut second_events = second.subscribe();
+
+    let first_event = tokio::time::timeout(std::time::Duration::from_secs(2), first_events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let second_event =
+        tokio::time::timeout(std::time::Duration::from_secs(1), second_events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(first_event, second_event);
+    assert_eq!(
+        first_event,
+        ClipboardServiceEvent::HistoryChanged { revision: 1 }
+    );
+    assert!(backend.reads.load(Ordering::Acquire) >= 1);
+    let history = first
+        .request("clipboard.history.list", json!({ "limit": 10 }))
+        .await
+        .unwrap();
+    assert_eq!(history["items"].as_array().unwrap().len(), 1);
+    assert_eq!(history["items"][0]["contentText"], "background text");
+
+    drop(first);
+    drop(second);
+    stop.notify_one();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn event_subscribers_close_when_the_service_connection_ends() {
+    let temporary = tempfile::tempdir().unwrap();
+    let data = temporary.path().join("clipboard");
+    let endpoint = data.join("service.endpoint.json");
+    let server = ServiceServer::bind_with_backend(
+        endpoint.clone(),
+        data.clone(),
+        "0.1.0-alpha.0",
+        Arc::new(UnavailableTestBackend),
+    )
+    .await
+    .unwrap();
+    let stop = server.stop_handle();
+    let task = tokio::spawn(server.run());
+    let client = ServiceClient::connect(&endpoint, &data, "event-close-client")
+        .await
+        .unwrap();
+    let mut events = client.subscribe();
+
+    stop.notify_one();
+    task.await.unwrap().unwrap();
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+        .await
+        .expect("event receiver should close promptly");
+    assert_eq!(
+        result,
+        Err(tokio::sync::broadcast::error::RecvError::Closed)
+    );
+}
+
+struct BackgroundTextBackend {
+    reads: AtomicUsize,
+}
+
+struct UnavailableTestBackend;
+
+impl ClipboardBackend for UnavailableTestBackend {
+    fn write_text(&self, _value: &str) -> Result<(), String> {
+        Err("clipboard unavailable".into())
+    }
+
+    fn write_image(&self, _value: &image::DynamicImage) -> Result<(), String> {
+        Err("clipboard unavailable".into())
+    }
+}
+
+impl ClipboardBackend for BackgroundTextBackend {
+    fn read_text(&self) -> Result<Option<String>, String> {
+        self.reads.fetch_add(1, Ordering::AcqRel);
+        Ok(Some("background text".into()))
+    }
+
+    fn write_text(&self, _value: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn write_image(&self, _value: &image::DynamicImage) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 fn seed_text_history(data: &std::path::Path) {

@@ -61,6 +61,19 @@ pub struct ErrorEnvelope {
     pub retryable: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "type")]
+pub enum ClipboardServiceEvent {
+    #[serde(rename = "clipboard.history.changed")]
+    HistoryChanged { revision: u64 },
+    #[serde(rename = "host.ui.open")]
+    HostUiOpen {
+        #[serde(rename = "windowId")]
+        window_id: String,
+        payload: Value,
+    },
+}
+
 impl From<ServiceError> for ErrorEnvelope {
     fn from(error: ServiceError) -> Self {
         Self {
@@ -87,6 +100,11 @@ pub enum ServiceReply {
         #[serde(rename = "requestId")]
         request_id: String,
         result: Value,
+    },
+    #[serde(rename = "event")]
+    Event {
+        #[serde(flatten)]
+        event: ClipboardServiceEvent,
     },
 }
 

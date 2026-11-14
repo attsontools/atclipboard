@@ -1,4 +1,11 @@
-use std::{io::Cursor, path::Path, sync::Arc};
+use std::{
+    io::Cursor,
+    path::Path,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+};
 
 use base64::{
     engine::general_purpose::{STANDARD as BASE64_STANDARD, URL_SAFE_NO_PAD},
@@ -7,18 +14,34 @@ use base64::{
 use image::ImageFormat;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tokio::sync::broadcast;
 
 use crate::{
-    storage::ClipboardSortKey, ClipboardItemKind, ClipboardSettings, ClipboardStore, ServiceError,
+    storage::ClipboardSortKey, ClipboardItemKind, ClipboardServiceEvent, ClipboardSettings,
+    ClipboardStore, ServiceError,
 };
 
 #[derive(Clone)]
 pub struct ClipboardService {
-    store: Arc<ClipboardStore>,
-    backend: Arc<dyn ClipboardBackend>,
+    pub(crate) store: Arc<ClipboardStore>,
+    pub(crate) backend: Arc<dyn ClipboardBackend>,
+    events: broadcast::Sender<ClipboardServiceEvent>,
+    revision: Arc<AtomicU64>,
 }
 
 pub trait ClipboardBackend: Send + Sync {
+    fn read_files(&self) -> Result<Option<Vec<String>>, String> {
+        Ok(None)
+    }
+
+    fn read_text(&self) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+
+    fn read_image(&self) -> Result<Option<ClipboardImage>, String> {
+        Ok(None)
+    }
+
     fn write_text(&self, value: &str) -> Result<(), String>;
     fn write_image(&self, value: &image::DynamicImage) -> Result<(), String>;
 
@@ -34,6 +57,17 @@ pub trait ClipboardBackend: Send + Sync {
     fn replace_shortcut(&self, _previous: &str, _next: &str) -> Result<(), String> {
         Err("global shortcut backend is not configured".into())
     }
+
+    fn initialize_shortcut(&self, _shortcut: &str) {}
+
+    fn set_open_history_handler(&self, _handler: Arc<dyn Fn() + Send + Sync>) {}
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClipboardImage {
+    pub rgba: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -67,10 +101,31 @@ impl ClipboardService {
         backend: Arc<dyn ClipboardBackend>,
     ) -> Result<Self, ServiceError> {
         let (store, _) = ClipboardStore::open(data_directory)?;
+        let (events, _) = broadcast::channel(256);
         Ok(Self {
             store: Arc::new(store),
             backend,
+            events,
+            revision: Arc::new(AtomicU64::new(0)),
         })
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<ClipboardServiceEvent> {
+        self.events.subscribe()
+    }
+
+    pub(crate) fn emit_history_changed(&self) {
+        let revision = self.revision.fetch_add(1, Ordering::AcqRel) + 1;
+        let _ = self
+            .events
+            .send(ClipboardServiceEvent::HistoryChanged { revision });
+    }
+
+    pub fn open_history(&self) {
+        let _ = self.events.send(ClipboardServiceEvent::HostUiOpen {
+            window_id: "history".into(),
+            payload: json!({}),
+        });
     }
 
     pub async fn request(&self, method: &str, params: Value) -> Result<Value, ServiceError> {
@@ -126,8 +181,11 @@ impl ClipboardService {
                     .get_item(&params.id)?
                     .ok_or_else(item_not_found)?;
                 let mut public = public_item(item, 256 * 1024, 1_600)?;
-                if !self.store.set_pinned(&params.id, params.is_pinned)? {
-                    return Err(item_not_found());
+                if public.is_pinned != params.is_pinned {
+                    if !self.store.set_pinned(&params.id, params.is_pinned)? {
+                        return Err(item_not_found());
+                    }
+                    self.emit_history_changed();
                 }
                 public.is_pinned = params.is_pinned;
                 Ok(serde_json::to_value(public).map_err(|_| response_invalid())?)
@@ -137,11 +195,15 @@ impl ClipboardService {
                 if !self.store.delete_item(&params.id)? {
                     return Err(item_not_found());
                 }
+                self.emit_history_changed();
                 Ok(json!({ "deleted": true }))
             }
             "clipboard.history.clearUnpinned" => {
                 let _: EmptyParams = decode_params(params)?;
                 let deleted_count = self.store.clear_unpinned()?;
+                if deleted_count > 0 {
+                    self.emit_history_changed();
+                }
                 Ok(json!({ "deletedCount": deleted_count }))
             }
             "clipboard.history.restore" => {
@@ -176,6 +238,7 @@ impl ClipboardService {
                     .store
                     .touch_copied(&params.id)?
                     .ok_or_else(item_not_found)?;
+                self.emit_history_changed();
                 Ok(json!({
                     "restored": true,
                     "lastCopiedAt": last_copied_at,
@@ -218,6 +281,9 @@ impl ClipboardService {
                         true,
                     )?;
                     return Err(error);
+                }
+                if previous != next {
+                    self.emit_history_changed();
                 }
                 settings_response(next, self.backend.shortcut_status())
             }

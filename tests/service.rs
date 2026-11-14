@@ -6,7 +6,9 @@ use std::{
     },
 };
 
-use atclipboard_service::{ClipboardBackend, ClipboardService, ClipboardShortcutStatus};
+use atclipboard_service::{
+    ClipboardBackend, ClipboardService, ClipboardServiceEvent, ClipboardShortcutStatus,
+};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use image::{Rgba, RgbaImage};
 use rusqlite::Connection;
@@ -859,6 +861,27 @@ impl RecordingClipboardBackend {
         self.writes.lock().unwrap().push(value);
         Ok(())
     }
+}
+
+#[test]
+fn shortcut_activation_broadcasts_only_the_signed_history_window_request() {
+    let temporary = tempfile::tempdir().unwrap();
+    let service = ClipboardService::open(temporary.path()).unwrap();
+    let mut events = service.subscribe();
+
+    service.open_history();
+
+    let event = events.try_recv().unwrap();
+    assert_eq!(
+        event,
+        ClipboardServiceEvent::HostUiOpen {
+            window_id: "history".into(),
+            payload: json!({}),
+        }
+    );
+    let serialized = serde_json::to_string(&event).unwrap();
+    assert!(!serialized.contains("content"));
+    assert!(!serialized.contains("path"));
 }
 
 fn item_ids(result: &Value) -> Vec<&str> {

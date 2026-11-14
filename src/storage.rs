@@ -7,7 +7,7 @@ use std::{
 
 use chrono::Utc;
 use fs2::FileExt;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -171,6 +171,66 @@ impl ClipboardStore {
         self.list_items_after(kind, query, None, limit)
     }
 
+    pub(crate) fn insert_files(&self, file_paths: Vec<String>) -> Result<bool, ServiceError> {
+        let file_paths = file_paths
+            .into_iter()
+            .map(|path| path.trim().to_string())
+            .filter(|path| !path.is_empty())
+            .collect::<Vec<_>>();
+        if file_paths.is_empty() {
+            return Ok(false);
+        }
+        let content_text = file_paths.join("\n");
+        let preview = if file_paths.len() == 1 {
+            "1 file".to_string()
+        } else {
+            format!("{} files", file_paths.len())
+        };
+        self.insert_item(ClipboardItemKind::Files, preview, content_text, file_paths)
+    }
+
+    pub(crate) fn insert_text(&self, value: &str) -> Result<bool, ServiceError> {
+        if value.trim().is_empty() {
+            return Ok(false);
+        }
+        self.insert_item(
+            ClipboardItemKind::Text,
+            preview(value.trim()),
+            value.to_string(),
+            Vec::new(),
+        )
+    }
+
+    pub(crate) fn insert_png_image(
+        &self,
+        bytes: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<bool, ServiceError> {
+        if bytes.is_empty() {
+            return Ok(false);
+        }
+        let content_hash = fnv1a64_hex(
+            format!("image:image/png:{width}:{height}:{}", fnv1a64_hex(bytes)).as_bytes(),
+        );
+        let id = format!("clip-{}", Uuid::new_v4().simple());
+        let asset_path = self.root_dir.join("assets").join(format!("{id}.png"));
+        fs::write(&asset_path, bytes).map_err(storage_io_error)?;
+        let result = self.insert_item_with_hash(
+            id,
+            ClipboardItemKind::Image,
+            format!("Image {width} x {height}"),
+            String::new(),
+            Some(asset_path.clone()),
+            Vec::new(),
+            content_hash,
+        );
+        if !matches!(result, Ok(true)) {
+            let _ = fs::remove_file(asset_path);
+        }
+        result
+    }
+
     pub fn get_item(&self, id: &str) -> Result<Option<ClipboardHistoryItem>, ServiceError> {
         let connection = Connection::open(&self.db_path).map_err(storage_sql_error)?;
         let row = connection
@@ -307,13 +367,7 @@ impl ClipboardStore {
     }
 
     pub fn clear_unpinned(&self) -> Result<usize, ServiceError> {
-        let items = self
-            .list_items_after(None, None, None, usize::MAX)?
-            .into_iter()
-            .filter(|item| !item.is_pinned)
-            .collect::<Vec<_>>();
-        self.delete_items(&items)?;
-        Ok(items.len())
+        self.delete_unpinned(None)
     }
 
     pub fn touch_copied(&self, id: &str) -> Result<Option<String>, ServiceError> {
@@ -385,15 +439,82 @@ impl ClipboardStore {
     }
 
     pub fn enforce_retention(&self, limit: usize) -> Result<usize, ServiceError> {
-        let items = self.list_items_after(None, None, None, usize::MAX)?;
+        self.delete_unpinned(Some(limit))
+    }
+
+    fn delete_unpinned(&self, total_limit: Option<usize>) -> Result<usize, ServiceError> {
+        self.delete_unpinned_with_hook(total_limit, || {})
+    }
+
+    fn delete_unpinned_with_hook(
+        &self,
+        total_limit: Option<usize>,
+        after_selection: impl FnOnce(),
+    ) -> Result<usize, ServiceError> {
+        let mut connection = Connection::open(&self.db_path).map_err(storage_sql_error)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage_sql_error)?;
+        let items = {
+            let mut statement = transaction
+                .prepare(
+                    r#"
+                    SELECT id, kind, preview, content_text, asset_path, file_paths_json,
+                           is_pinned, created_at, last_copied_at
+                    FROM clipboard_items
+                    ORDER BY is_pinned DESC, created_at DESC, id DESC
+                    "#,
+                )
+                .map_err(storage_sql_error)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, Option<String>>(8)?,
+                    ))
+                })
+                .map_err(storage_sql_error)?;
+            rows.map(|row| {
+                row.map_err(storage_sql_error)
+                    .and_then(history_item_from_row)
+            })
+            .collect::<Result<Vec<_>, _>>()?
+        };
         let pinned_count = items.iter().filter(|item| item.is_pinned).count();
-        let unpinned_limit = limit.saturating_sub(pinned_count);
+        let unpinned_limit = total_limit
+            .map(|limit| limit.saturating_sub(pinned_count))
+            .unwrap_or(0);
         let items = items
             .into_iter()
             .filter(|item| !item.is_pinned)
             .skip(unpinned_limit)
             .collect::<Vec<_>>();
-        self.delete_items(&items)?;
+        let assets = items
+            .iter()
+            .filter_map(ClipboardHistoryItem::asset_path)
+            .map(|path| self.validated_asset_path(path))
+            .collect::<Result<Vec<_>, _>>()?;
+        after_selection();
+        for item in &items {
+            let changed = transaction
+                .execute(
+                    "DELETE FROM clipboard_items WHERE id = ?1 AND is_pinned = 0",
+                    params![item.id],
+                )
+                .map_err(storage_sql_error)?;
+            if changed != 1 {
+                return Err(storage_changed());
+            }
+        }
+        transaction.commit().map_err(storage_sql_error)?;
+        cleanup_assets(assets);
         Ok(items.len())
     }
 
@@ -417,13 +538,7 @@ impl ClipboardStore {
             }
         }
         transaction.commit().map_err(storage_sql_error)?;
-        for asset in assets {
-            if fs::remove_file(asset).is_err() {
-                eprintln!(
-                    "CLIPBOARD_SERVICE_ASSET_CLEANUP_FAILED: deleted history has an orphaned image asset"
-                );
-            }
-        }
+        cleanup_assets(assets);
         Ok(())
     }
 
@@ -447,6 +562,100 @@ impl ClipboardStore {
     pub fn root_dir(&self) -> &Path {
         &self.root_dir
     }
+
+    fn insert_item(
+        &self,
+        kind: ClipboardItemKind,
+        preview: String,
+        content_text: String,
+        file_paths: Vec<String>,
+    ) -> Result<bool, ServiceError> {
+        let kind_value = match kind {
+            ClipboardItemKind::Text => "text",
+            ClipboardItemKind::Image => "image",
+            ClipboardItemKind::Files => "files",
+        };
+        let content_hash = fnv1a64_hex(
+            format!("{kind_value}:{content_text}:{}", file_paths.join("\n")).as_bytes(),
+        );
+        self.insert_item_with_hash(
+            format!("clip-{}", Uuid::new_v4().simple()),
+            kind,
+            preview,
+            content_text,
+            None,
+            file_paths,
+            content_hash,
+        )
+    }
+
+    fn insert_item_with_hash(
+        &self,
+        id: String,
+        kind: ClipboardItemKind,
+        preview: String,
+        content_text: String,
+        asset_path: Option<PathBuf>,
+        file_paths: Vec<String>,
+        content_hash: String,
+    ) -> Result<bool, ServiceError> {
+        let kind_value = match kind {
+            ClipboardItemKind::Text => "text",
+            ClipboardItemKind::Image => "image",
+            ClipboardItemKind::Files => "files",
+        };
+        let created_at = Utc::now().to_rfc3339();
+        let file_paths_json = serde_json::to_string(&file_paths).map_err(storage_json_error)?;
+        let connection = Connection::open(&self.db_path).map_err(storage_sql_error)?;
+        let changed = connection
+            .execute(
+                r#"
+                INSERT OR IGNORE INTO clipboard_items (
+                    id, kind, preview, content_text, asset_path, file_paths_json,
+                    content_hash, is_pinned, created_at, last_copied_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, NULL)
+                "#,
+                params![
+                    id,
+                    kind_value,
+                    preview,
+                    content_text,
+                    asset_path.map(|path| path.to_string_lossy().into_owned()),
+                    file_paths_json,
+                    content_hash,
+                    created_at
+                ],
+            )
+            .map_err(storage_sql_error)?;
+        Ok(changed == 1)
+    }
+}
+
+fn cleanup_assets(assets: Vec<PathBuf>) {
+    for asset in assets {
+        if fs::remove_file(asset).is_err() {
+            eprintln!(
+                "CLIPBOARD_SERVICE_ASSET_CLEANUP_FAILED: deleted history has an orphaned image asset"
+            );
+        }
+    }
+}
+
+fn preview(value: &str) -> String {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= 120 {
+        return normalized;
+    }
+    format!("{}...", normalized.chars().take(117).collect::<String>())
+}
+
+fn fnv1a64_hex(bytes: &[u8]) -> String {
+    const OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+    let hash = bytes.iter().fold(OFFSET_BASIS, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(PRIME)
+    });
+    format!("{hash:016x}")
 }
 
 fn sorts_after(candidate: &ClipboardSortKey, cursor: &ClipboardSortKey) -> bool {
@@ -777,4 +986,51 @@ fn storage_changed() -> ServiceError {
         "CLIPBOARD_SERVICE_STORAGE_CHANGED",
         "clipboard history changed during the operation",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{mpsc, Arc};
+
+    use super::ClipboardStore;
+
+    #[test]
+    fn pin_and_retention_have_one_linearized_winner() {
+        let temporary = tempfile::tempdir().unwrap();
+        let (store, _) = ClipboardStore::open(temporary.path()).unwrap();
+        assert!(store.insert_text("candidate").unwrap());
+        let id = store.list_items(None, None, 10).unwrap()[0].id.clone();
+        let store = Arc::new(store);
+        let (selected_tx, selected_rx) = mpsc::sync_channel(1);
+        let (continue_tx, continue_rx) = mpsc::sync_channel(1);
+        let cleanup_store = Arc::clone(&store);
+        let cleanup = std::thread::spawn(move || {
+            cleanup_store
+                .delete_unpinned_with_hook(Some(0), || {
+                    selected_tx.send(()).unwrap();
+                    continue_rx.recv().unwrap();
+                })
+                .unwrap()
+        });
+        selected_rx.recv().unwrap();
+        let (pin_started_tx, pin_started_rx) = mpsc::sync_channel(1);
+        let pin_store = Arc::clone(&store);
+        let pin_id = id.clone();
+        let pin = std::thread::spawn(move || {
+            pin_started_tx.send(()).unwrap();
+            pin_store.set_pinned(&pin_id, true).unwrap()
+        });
+        pin_started_rx.recv().unwrap();
+        continue_tx.send(()).unwrap();
+
+        assert_eq!(cleanup.join().unwrap(), 1);
+        assert!(!pin.join().unwrap());
+        assert!(store.get_item(&id).unwrap().is_none());
+
+        assert!(store.insert_text("pin first").unwrap());
+        let pinned_id = store.list_items(None, None, 10).unwrap()[0].id.clone();
+        assert!(store.set_pinned(&pinned_id, true).unwrap());
+        assert_eq!(store.delete_unpinned_with_hook(Some(0), || {}).unwrap(), 0);
+        assert!(store.get_item(&pinned_id).unwrap().unwrap().is_pinned);
+    }
 }

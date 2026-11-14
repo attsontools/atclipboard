@@ -2,20 +2,24 @@ use std::{
     fs::{self, File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{mpsc, Arc},
+    thread,
+    time::Duration,
 };
 
 use fs2::FileExt;
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{tcp::OwnedWriteHalf, TcpListener, TcpStream},
-    sync::{Mutex, Notify},
+    sync::{broadcast, Mutex, Notify},
+    task::JoinSet,
 };
 use uuid::Uuid;
 
 use crate::{
-    negotiate, write_endpoint, ClipboardService, Endpoint, ErrorEnvelope, ServiceError,
-    ServiceHandshake, ServiceReply, ServiceRequest,
+    negotiate, write_endpoint, ClipboardBackend, ClipboardRuntime, ClipboardService, Endpoint,
+    ErrorEnvelope, ServiceError, ServiceHandshake, ServiceReply, ServiceRequest,
+    SystemClipboardBackend,
 };
 
 const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
@@ -36,10 +40,32 @@ impl ServiceServer {
         data_directory: PathBuf,
         service_version: impl Into<String>,
     ) -> Result<Self, ServiceError> {
+        let service = ClipboardService::open_with_backend(
+            &data_directory,
+            Arc::new(SystemClipboardBackend::new()),
+        )?;
+        Self::bind_service(endpoint_path, data_directory, service_version, service).await
+    }
+
+    pub async fn bind_with_backend(
+        endpoint_path: PathBuf,
+        data_directory: PathBuf,
+        service_version: impl Into<String>,
+        backend: Arc<dyn ClipboardBackend>,
+    ) -> Result<Self, ServiceError> {
+        let service = ClipboardService::open_with_backend(&data_directory, backend)?;
+        Self::bind_service(endpoint_path, data_directory, service_version, service).await
+    }
+
+    async fn bind_service(
+        endpoint_path: PathBuf,
+        data_directory: PathBuf,
+        service_version: impl Into<String>,
+        service: ClipboardService,
+    ) -> Result<Self, ServiceError> {
         fs::create_dir_all(&data_directory).map_err(|_| lease_error())?;
         let token = Uuid::new_v4().to_string();
         let lease = ServiceLease::acquire(&data_directory, &token)?;
-        let service = ClipboardService::open(&data_directory)?;
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
             .map_err(|_| start_error())?;
@@ -52,6 +78,13 @@ impl ServiceServer {
                 service_version: service_version.into(),
             },
         )?;
+        let history_service = service.clone();
+        service
+            .backend
+            .set_open_history_handler(Arc::new(move || history_service.open_history()));
+        if let Ok(settings) = service.store.load_settings() {
+            service.backend.initialize_shortcut(&settings.shortcut);
+        }
         Ok(Self {
             listener,
             endpoint_path,
@@ -68,9 +101,12 @@ impl ServiceServer {
     }
 
     pub async fn run(self) -> Result<(), ServiceError> {
+        let _watcher = BackgroundWatcher::start(ClipboardRuntime::new(self.service.clone()));
+        let mut connections = JoinSet::new();
         loop {
             tokio::select! {
                 _ = self.stop.notified() => break,
+                Some(_) = connections.join_next(), if !connections.is_empty() => {}
                 accepted = self.listener.accept() => {
                     let (stream, _) = accepted.map_err(|_| ServiceError::new(
                         "CLIPBOARD_SERVICE_ACCEPT_FAILED",
@@ -79,14 +115,59 @@ impl ServiceServer {
                     let service = self.service.clone();
                     let token = self.token.clone();
                     let data_directory = self.data_directory.to_string_lossy().into_owned();
-                    tokio::spawn(async move {
+                    connections.spawn(async move {
                         let _ = handle_connection(stream, service, token, data_directory).await;
                     });
                 }
             }
         }
+        connections.abort_all();
+        while connections.join_next().await.is_some() {}
         let _ = fs::remove_file(&self.endpoint_path);
         Ok(())
+    }
+}
+
+struct BackgroundWatcher {
+    stop: Option<mpsc::Sender<()>>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl BackgroundWatcher {
+    fn start(runtime: ClipboardRuntime) -> Self {
+        let (stop, stopped) = mpsc::channel();
+        let thread = thread::spawn(move || {
+            let mut last_error = None;
+            loop {
+                match stopped.recv_timeout(Duration::from_millis(800)) {
+                    Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(mpsc::RecvTimeoutError::Timeout) => match runtime.tick() {
+                        Ok(_) => last_error = None,
+                        Err(error) => {
+                            if last_error != Some(error.code) {
+                                eprintln!("{}: {}", error.code, error.message);
+                            }
+                            last_error = Some(error.code);
+                        }
+                    },
+                }
+            }
+        });
+        Self {
+            stop: Some(stop),
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for BackgroundWatcher {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
@@ -132,12 +213,21 @@ async fn handle_connection(
     };
     write_reply(&writer, &response).await?;
 
+    let mut events = service.subscribe();
+    line.clear();
     loop {
-        line.clear();
-        match read_line(&mut reader, &mut line).await {
-            Ok(false) => break,
-            Ok(true) => {}
-            Err(error) => return Err(error),
+        tokio::select! {
+            event = receive_next_event(&mut events) => {
+                let Some(event) = event else {
+                    break;
+                };
+                write_reply(&writer, &ServiceReply::Event { event }).await?;
+                continue;
+            }
+            read = read_line(&mut reader, &mut line) => match read? {
+                false => break,
+                true => {}
+            },
         }
         let request = match serde_json::from_slice::<ServiceRequest>(&line) {
             Ok(request) => request,
@@ -154,6 +244,7 @@ async fn handle_connection(
                     },
                 )
                 .await?;
+                line.clear();
                 continue;
             }
         };
@@ -170,8 +261,21 @@ async fn handle_connection(
             },
         };
         write_reply(&writer, &reply).await?;
+        line.clear();
     }
     Ok(())
+}
+
+async fn receive_next_event(
+    events: &mut broadcast::Receiver<crate::ClipboardServiceEvent>,
+) -> Option<crate::ClipboardServiceEvent> {
+    loop {
+        match events.recv().await {
+            Ok(event) => return Some(event),
+            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(broadcast::error::RecvError::Closed) => return None,
+        }
+    }
 }
 
 async fn read_line<R>(reader: &mut R, line: &mut Vec<u8>) -> Result<bool, ServiceError>
@@ -288,4 +392,35 @@ fn disconnected() -> ServiceError {
         "CLIPBOARD_SERVICE_DISCONNECTED",
         "clipboard service connection was closed",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::sync::broadcast;
+
+    use super::receive_next_event;
+    use crate::ClipboardServiceEvent;
+
+    #[tokio::test]
+    async fn lagged_event_receivers_continue_with_the_latest_event() {
+        let (events, mut receiver) = broadcast::channel(1);
+        events
+            .send(ClipboardServiceEvent::HistoryChanged { revision: 1 })
+            .unwrap();
+        events
+            .send(ClipboardServiceEvent::HistoryChanged { revision: 2 })
+            .unwrap();
+
+        assert_eq!(
+            receive_next_event(&mut receiver).await,
+            Some(ClipboardServiceEvent::HistoryChanged { revision: 2 })
+        );
+        events
+            .send(ClipboardServiceEvent::HistoryChanged { revision: 3 })
+            .unwrap();
+        assert_eq!(
+            receive_next_event(&mut receiver).await,
+            Some(ClipboardServiceEvent::HistoryChanged { revision: 3 })
+        );
+    }
 }

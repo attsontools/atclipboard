@@ -1,26 +1,15 @@
-use atclipboard_service::{parse_service_args, ServiceError, ServiceServer};
+use atclipboard_service::{
+    parse_service_args, run_service_process, run_x11_clipboard_owner_if_requested,
+};
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() {
-    if let Err(error) = run().await {
+fn main() {
+    if run_x11_clipboard_owner_if_requested() {
+        return;
+    }
+    let result = parse_service_args(std::env::args_os().skip(1))
+        .and_then(|options| run_service_process(options, env!("CARGO_PKG_VERSION")));
+    if let Err(error) = result {
         eprintln!("{}: {}", error.code, error.message);
         std::process::exit(1);
     }
-}
-
-async fn run() -> Result<(), ServiceError> {
-    let options = parse_service_args(std::env::args_os().skip(1))?;
-    let server = ServiceServer::bind(
-        options.endpoint_path,
-        options.data_directory,
-        env!("CARGO_PKG_VERSION"),
-    )
-    .await?;
-    let stop = server.stop_handle();
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            stop.notify_one();
-        }
-    });
-    server.run().await
 }

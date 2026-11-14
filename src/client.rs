@@ -8,14 +8,14 @@ use serde_json::Value;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{tcp::OwnedWriteHalf, TcpStream},
-    sync::{oneshot, Mutex as AsyncMutex},
+    sync::{broadcast, oneshot, Mutex as AsyncMutex},
     time::{timeout, Duration},
 };
 use uuid::Uuid;
 
 use crate::{
-    read_endpoint, HandshakeRequest, ServiceHandshake, ServiceReply, ServiceRequest, APP_ID,
-    DATA_API, HOST_API, SERVICE_API,
+    read_endpoint, ClipboardServiceEvent, HandshakeRequest, ServiceHandshake, ServiceReply,
+    ServiceRequest, APP_ID, DATA_API, HOST_API, SERVICE_API,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,6 +54,7 @@ struct ClientState {
 pub struct ServiceClient {
     writer: Arc<AsyncMutex<OwnedWriteHalf>>,
     state: Arc<Mutex<ClientState>>,
+    events: broadcast::WeakSender<ClipboardServiceEvent>,
 }
 
 impl ServiceClient {
@@ -123,11 +124,24 @@ impl ServiceClient {
             }
         }
         let state = Arc::new(Mutex::new(ClientState::default()));
-        tokio::spawn(read_replies(reader, Arc::clone(&state)));
+        let (events, _) = broadcast::channel(256);
+        let weak_events = events.downgrade();
+        tokio::spawn(read_replies(reader, Arc::clone(&state), events));
         Ok(Self {
             writer: Arc::new(AsyncMutex::new(writer)),
             state,
+            events: weak_events,
         })
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<ClipboardServiceEvent> {
+        if let Some(events) = self.events.upgrade() {
+            events.subscribe()
+        } else {
+            let (events, receiver) = broadcast::channel(1);
+            drop(events);
+            receiver
+        }
     }
 
     pub async fn request(
@@ -178,6 +192,7 @@ impl ServiceClient {
 async fn read_replies(
     mut reader: BufReader<tokio::net::tcp::OwnedReadHalf>,
     state: Arc<Mutex<ClientState>>,
+    events: broadcast::Sender<ClipboardServiceEvent>,
 ) {
     let mut line = Vec::new();
     let error = loop {
@@ -222,6 +237,9 @@ async fn read_replies(
                         retryable: error.retryable,
                     }));
                 }
+            }
+            ServiceReply::Event { event } => {
+                let _ = events.send(event);
             }
             ServiceReply::Handshake(_) => {
                 break ServiceClientError::new(
