@@ -1,1 +1,1 @@
-{}
+{"default":{"identifier":"default","description":"Clipboard UI event permissions","local":true,"windows":["main","history","preview"],"permissions":["core:event:default"]}}

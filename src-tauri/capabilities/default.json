@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Clipboard UI event permissions",
+  "windows": ["main", "history", "preview"],
+  "permissions": ["core:event:default"]
+}

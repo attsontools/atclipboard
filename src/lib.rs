@@ -24,7 +24,7 @@ pub use server::ServiceServer;
 pub use service::{ClipboardBackend, ClipboardImage, ClipboardService, ClipboardShortcutStatus};
 pub use service_cli::{parse_service_args, ServiceRunOptions};
 pub use shortcut::run_service_process;
-pub use standalone_service::StandaloneService;
+pub use standalone_service::{ServiceEventReceiver, StandaloneService};
 pub use storage::{
     ClipboardHistoryItem, ClipboardItemKind, ClipboardSettings, ClipboardStore, TakeoverOutcome,
 };

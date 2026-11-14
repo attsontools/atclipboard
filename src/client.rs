@@ -144,6 +144,14 @@ impl ServiceClient {
         }
     }
 
+    pub fn is_disconnected(&self) -> bool {
+        self.state
+            .lock()
+            .expect("client state mutex poisoned")
+            .disconnected
+            .is_some()
+    }
+
     pub async fn request(
         &self,
         method: impl Into<String>,

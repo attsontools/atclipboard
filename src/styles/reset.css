@@ -1,4 +1,18 @@
 * { box-sizing: border-box; }
-html, body, #app { min-height: 100%; margin: 0; }
-body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif; background: var(--bg-base); }
-button, input { font: inherit; }
+html, body, #app { width: 100%; min-height: 100%; margin: 0; }
+body {
+  overflow-x: hidden;
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Segoe UI", sans-serif;
+  font-size: var(--font-md);
+  letter-spacing: 0;
+  background: var(--bg-base);
+}
+button, input, select { color: inherit; font: inherit; letter-spacing: 0; }
+button { cursor: pointer; }
+button:disabled { cursor: not-allowed; opacity: 0.55; }
+button:focus-visible, input:focus-visible, select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+svg { display: block; }
