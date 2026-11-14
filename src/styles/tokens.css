@@ -1,0 +1,11 @@
+:root {
+  --bg-base: #101312;
+  --bg-raised: #171b19;
+  --bg-control: #202522;
+  --text: #eef3f0;
+  --text-muted: #929c96;
+  --border: #303833;
+  --accent: #34d399;
+  --danger: #fb7185;
+  --radius-sm: 6px;
+}

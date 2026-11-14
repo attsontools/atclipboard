@@ -1,0 +1,34 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "剪贴板",
+  "version": "0.1.0-alpha.0",
+  "identifier": "com.attson.clipboard",
+  "build": {
+    "beforeDevCommand": "pnpm stage:service && pnpm dev",
+    "devUrl": "http://127.0.0.1:1429",
+    "beforeBuildCommand": "pnpm build && pnpm stage:service --release",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "剪贴板",
+        "width": 980,
+        "height": 720,
+        "minWidth": 720,
+        "minHeight": 520,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg", "deb", "nsis"],
+    "externalBin": ["binaries/atclipboard-service"]
+  },
+  "plugins": {}
+}
