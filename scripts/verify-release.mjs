@@ -47,7 +47,38 @@ export async function verifyReleaseAssets(directory, version) {
   }
 }
 
+export async function verifyBuildAssets(root) {
+  const iconPath = path.join(root, 'src-tauri', 'icons', 'icon.ico');
+  let icon;
+  try {
+    icon = await readFile(iconPath);
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      throw new Error(`Required Windows build asset is missing: ${iconPath}`);
+    }
+    throw error;
+  }
+  if (!isValidWindowsIcon(icon)) {
+    throw new Error(`Required build asset is not a valid Windows icon: ${iconPath}`);
+  }
+}
+
+function isValidWindowsIcon(icon) {
+  if (icon.length < 6 || icon.readUInt16LE(0) !== 0 || icon.readUInt16LE(2) !== 1) return false;
+  const imageCount = icon.readUInt16LE(4);
+  const directoryEnd = 6 + (imageCount * 16);
+  if (imageCount < 1 || directoryEnd > icon.length) return false;
+  for (let index = 0; index < imageCount; index += 1) {
+    const entryOffset = 6 + (index * 16);
+    const imageSize = icon.readUInt32LE(entryOffset + 8);
+    const imageOffset = icon.readUInt32LE(entryOffset + 12);
+    if (imageSize < 1 || imageOffset < directoryEnd || imageOffset + imageSize > icon.length) return false;
+  }
+  return true;
+}
+
 async function verifyProjectVersions(root, tagName) {
+  await verifyBuildAssets(root);
   const packageJson = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
   const tauriConfig = JSON.parse(await readFile(path.join(root, 'src-tauri', 'tauri.conf.json'), 'utf8'));
   return assertVersionAlignment({
