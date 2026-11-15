@@ -1,8 +1,11 @@
 // @ts-nocheck
+import { generateKeyPairSync } from 'node:crypto';
+
 import { describe, expect, it } from 'vitest';
 
 import {
   createPluginManifest,
+  loadPublisherSigningConfig,
   requiredPayloadPaths,
   resolveReleaseTarget,
 } from '../scripts/package-plugin.mjs';
@@ -76,5 +79,42 @@ describe('clipboard plugin package contract', () => {
       });
     }
     expect(() => resolveReleaseTarget('wasm32-unknown-unknown')).toThrow(/Unsupported/);
+  });
+
+  it('accepts only a matching Ed25519 production Publisher key pair', () => {
+    const keys = generateKeyPairSync('ed25519');
+    const publicJwk = keys.publicKey.export({ format: 'jwk' });
+    const publicKey = Buffer.from(publicJwk.x, 'base64url').toString('base64');
+    const privateKey = keys.privateKey.export({ format: 'pem', type: 'pkcs8' }).toString();
+
+    const signing = loadPublisherSigningConfig({
+      ATCLIPBOARD_PUBLISHER_KEY_ID: 'attson-clipboard-2026-01',
+      ATCLIPBOARD_PUBLISHER_PRIVATE_KEY: privateKey,
+      ATCLIPBOARD_PUBLISHER_PUBLIC_KEY: publicKey,
+    });
+
+    expect(signing.keyId).toBe('attson-clipboard-2026-01');
+    expect(signing.privateKey.asymmetricKeyType).toBe('ed25519');
+    expect(signing.publicKey.asymmetricKeyType).toBe('ed25519');
+  });
+
+  it('rejects missing, malformed, and mismatched production Publisher keys', () => {
+    const first = generateKeyPairSync('ed25519');
+    const second = generateKeyPairSync('ed25519');
+    const privateKey = first.privateKey.export({ format: 'pem', type: 'pkcs8' }).toString();
+    const secondJwk = second.publicKey.export({ format: 'jwk' });
+    const wrongPublicKey = Buffer.from(secondJwk.x, 'base64url').toString('base64');
+
+    expect(() => loadPublisherSigningConfig({})).toThrow(/KEY_ID is required/);
+    expect(() => loadPublisherSigningConfig({
+      ATCLIPBOARD_PUBLISHER_KEY_ID: 'attson-clipboard-2026-01',
+      ATCLIPBOARD_PUBLISHER_PRIVATE_KEY: 'not-a-key',
+      ATCLIPBOARD_PUBLISHER_PUBLIC_KEY: wrongPublicKey,
+    })).toThrow(/must be an Ed25519 private key/);
+    expect(() => loadPublisherSigningConfig({
+      ATCLIPBOARD_PUBLISHER_KEY_ID: 'attson-clipboard-2026-01',
+      ATCLIPBOARD_PUBLISHER_PRIVATE_KEY: privateKey,
+      ATCLIPBOARD_PUBLISHER_PUBLIC_KEY: wrongPublicKey,
+    })).toThrow(/does not match configured public key/);
   });
 });

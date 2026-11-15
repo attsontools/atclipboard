@@ -8,7 +8,8 @@
     "dev": "vite --host 127.0.0.1 --port 1429",
     "build": "tsc --noEmit && vite build",
     "build:plugin": "tsc --noEmit && vite build --mode plugin --outDir dist-plugin",
-    "package:plugin:test": "pnpm build:plugin && pnpm stage:service --release && node scripts/package-plugin.mjs",
+    "package:plugin": "pnpm build:plugin && pnpm stage:service --release && node scripts/package-plugin.mjs",
+    "package:plugin:test": "pnpm build:plugin && pnpm stage:service --release && node scripts/package-plugin.mjs --test-signing",
     "stage:service": "node scripts/stage-service.mjs",
     "test": "vitest run",
     "tauri": "tauri",
@@ -16,7 +17,7 @@
     "tauri:build": "tauri build"
   },
   "dependencies": {
-    "@attson/plugin-sdk": "file:../attool-plugin-sdk",
+    "@attson/plugin-sdk": "https://gh-proxy.com/https://github.com/attsontools/attool-plugin-sdk/archive/410158b5e850836d5db681b1a02b13e4d55d53d6.tar.gz",
     "@tauri-apps/api": "2.12.3",
     "naive-ui": "2.44.1",
     "vue": "3.5.33"

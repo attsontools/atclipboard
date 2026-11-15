@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@attson/plugin-sdk':
-        specifier: file:../attool-plugin-sdk
-        version: file:../attool-plugin-sdk
+        specifier: https://gh-proxy.com/https://github.com/attsontools/attool-plugin-sdk/archive/410158b5e850836d5db681b1a02b13e4d55d53d6.tar.gz
+        version: https://gh-proxy.com/https://github.com/attsontools/attool-plugin-sdk/archive/410158b5e850836d5db681b1a02b13e4d55d53d6.tar.gz
       '@tauri-apps/api':
         specifier: 2.12.3
         version: 2.12.3
@@ -39,8 +39,9 @@ importers:
 
 packages:
 
-  '@attson/plugin-sdk@file:../attool-plugin-sdk':
-    resolution: {directory: ../attool-plugin-sdk, type: directory}
+  '@attson/plugin-sdk@https://gh-proxy.com/https://github.com/attsontools/attool-plugin-sdk/archive/410158b5e850836d5db681b1a02b13e4d55d53d6.tar.gz':
+    resolution: {integrity: sha512-E/m5zimThFrti8tcdecELxHWGPKm5CkU1yn5k+IIQg03x049NAySGh0Gu31GnAKR4d03CKiOlTY3xPDb/q5fsw==, tarball: https://gh-proxy.com/https://github.com/attsontools/attool-plugin-sdk/archive/410158b5e850836d5db681b1a02b13e4d55d53d6.tar.gz}
+    version: 0.1.0-alpha.2
     engines: {node: '>=22.6'}
 
   '@babel/helper-string-parser@7.29.14':
@@ -710,7 +711,7 @@ packages:
 
 snapshots:
 
-  '@attson/plugin-sdk@file:../attool-plugin-sdk': {}
+  '@attson/plugin-sdk@https://gh-proxy.com/https://github.com/attsontools/attool-plugin-sdk/archive/410158b5e850836d5db681b1a02b13e4d55d53d6.tar.gz': {}
 
   '@babel/helper-string-parser@7.29.14': {}
 

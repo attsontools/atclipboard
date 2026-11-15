@@ -82,9 +82,8 @@ export function createPluginManifest({ version, target, publisherKeyId, files })
   });
 }
 
-export async function buildTestPackage({ root, version, targetTriple }) {
+export async function buildPluginPackage({ root, version, targetTriple, signing }) {
   const target = resolveReleaseTarget(targetTriple);
-  const signing = localTestSigningKey();
   const stage = await mkdtemp(path.join(tmpdir(), 'atclipboard-plugin-'));
   const artifacts = path.join(root, 'artifacts');
   const output = path.join(
@@ -134,6 +133,44 @@ export async function buildTestPackage({ root, version, targetTriple }) {
   } finally {
     await rm(stage, { recursive: true, force: true });
   }
+}
+
+export async function buildTestPackage({ root, version, targetTriple }) {
+  return buildPluginPackage({
+    root,
+    version,
+    targetTriple,
+    signing: localTestSigningKey(),
+  });
+}
+
+export function loadPublisherSigningConfig(env) {
+  const keyId = env.ATCLIPBOARD_PUBLISHER_KEY_ID?.trim();
+  if (!keyId) throw new Error('ATCLIPBOARD_PUBLISHER_KEY_ID is required');
+  const encodedKey = env.ATCLIPBOARD_PUBLISHER_PRIVATE_KEY?.trim();
+  if (!encodedKey) throw new Error('ATCLIPBOARD_PUBLISHER_PRIVATE_KEY is required');
+  const encodedPublicKey = env.ATCLIPBOARD_PUBLISHER_PUBLIC_KEY?.trim();
+  if (!encodedPublicKey) throw new Error('ATCLIPBOARD_PUBLISHER_PUBLIC_KEY is required');
+  if (!/^[A-Za-z0-9+/]{43}=$/.test(encodedPublicKey)) {
+    throw new Error('ATCLIPBOARD_PUBLISHER_PUBLIC_KEY must be a raw Ed25519 public key');
+  }
+
+  let privateKey;
+  try {
+    privateKey = createPrivateKey(encodedKey);
+  } catch {
+    throw new Error('ATCLIPBOARD_PUBLISHER_PRIVATE_KEY must be an Ed25519 private key');
+  }
+  if (privateKey.asymmetricKeyType !== 'ed25519') {
+    throw new Error('ATCLIPBOARD_PUBLISHER_PRIVATE_KEY must be an Ed25519 private key');
+  }
+  const publicKey = createPublicKey(privateKey);
+  const derivedPublicKey = publicKey.export({ format: 'jwk' });
+  const derivedPublicKeyBase64 = Buffer.from(derivedPublicKey.x, 'base64url').toString('base64');
+  if (derivedPublicKeyBase64 !== encodedPublicKey) {
+    throw new Error('Publisher private key does not match configured public key');
+  }
+  return { keyId, privateKey, publicKey };
 }
 
 export async function verifyPluginPackage(packagePath, publicKey, expected) {
@@ -283,10 +320,14 @@ function requireEqual(actual, expected, label) {
 async function main() {
   const root = path.resolve(import.meta.dirname, '..');
   const packageJson = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
-  const result = await buildTestPackage({
+  const signing = process.argv.includes('--test-signing')
+    ? localTestSigningKey()
+    : loadPublisherSigningConfig(process.env);
+  const result = await buildPluginPackage({
     root,
     version: packageJson.version,
     targetTriple: process.env.ATCLIPBOARD_RELEASE_TARGET || rustHostTarget(),
+    signing,
   });
   console.log(result.output);
 }
