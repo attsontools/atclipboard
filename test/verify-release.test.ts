@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import {
   assertVersionAlignment,
   expectedReleaseAssets,
+  verifyBuildAssets,
   verifyReleaseAssets,
 } from '../scripts/verify-release.mjs';
 
@@ -59,6 +60,26 @@ describe('clipboard release contract', () => {
       serviceCargoVersion: '0.1.0-alpha.1',
       tauriCargoVersion: '0.1.0-alpha.1',
     })).toThrow(/must all match/);
+  });
+
+  it('requires a valid Windows icon before release builds start', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'atclipboard-build-assets-'));
+    const icons = path.join(root, 'src-tauri', 'icons');
+    await mkdir(icons, { recursive: true });
+
+    await expect(verifyBuildAssets(root)).rejects.toThrow(/icon\.ico/);
+    await writeFile(path.join(icons, 'icon.ico'), 'not an icon');
+    await expect(verifyBuildAssets(root)).rejects.toThrow(/valid Windows icon/);
+    await writeFile(path.join(icons, 'icon.ico'), Buffer.from([0, 0, 1, 0, 1, 0]));
+    await expect(verifyBuildAssets(root)).rejects.toThrow(/valid Windows icon/);
+
+    const validIcon = Buffer.alloc(23);
+    validIcon.writeUInt16LE(1, 2);
+    validIcon.writeUInt16LE(1, 4);
+    validIcon.writeUInt32LE(1, 14);
+    validIcon.writeUInt32LE(22, 18);
+    await writeFile(path.join(icons, 'icon.ico'), validIcon);
+    await expect(verifyBuildAssets(root)).resolves.toBeUndefined();
   });
 
   it('defines exactly one installer and one plugin package for every target', () => {
