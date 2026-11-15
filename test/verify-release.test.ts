@@ -35,6 +35,8 @@ describe('clipboard release contract', () => {
     expect(workflow).toContain('ATCLIPBOARD_PUBLISHER_PUBLIC_KEY');
     expect(workflow).toContain('run: pnpm package:plugin');
     expect(workflow).toContain('node scripts/verify-release.mjs assets');
+    expect(workflow).toContain('group: release-${{ github.ref }}');
+    expect(workflow).toContain('cancel-in-progress: false');
     expect(workflow).not.toContain('package:plugin:test');
     const testJob = workflow.slice(workflow.indexOf('  test:'), workflow.indexOf('  build:'));
     expect(testJob).toContain('libwebkit2gtk-4.1-dev');
