@@ -7,6 +7,7 @@ mod server;
 mod service;
 mod service_cli;
 mod shortcut;
+mod snapshot;
 mod standalone_service;
 mod storage;
 mod supervisor;
@@ -24,6 +25,7 @@ pub use server::ServiceServer;
 pub use service::{ClipboardBackend, ClipboardImage, ClipboardService, ClipboardShortcutStatus};
 pub use service_cli::{parse_service_args, ServiceRunOptions};
 pub use shortcut::run_service_process;
+pub use snapshot::run_snapshot_helper_if_requested;
 pub use standalone_service::{ServiceEventReceiver, StandaloneService};
 pub use storage::{
     ClipboardHistoryItem, ClipboardItemKind, ClipboardSettings, ClipboardStore, TakeoverOutcome,
