@@ -1,8 +1,16 @@
 use atclipboard_service::{
-    parse_service_args, run_service_process, run_x11_clipboard_owner_if_requested,
+    parse_service_args, run_service_process, run_snapshot_helper_if_requested,
+    run_x11_clipboard_owner_if_requested,
 };
 
 fn main() {
+    if let Some(result) = run_snapshot_helper_if_requested() {
+        if let Err(error) = result {
+            eprintln!("{}: {}", error.code, error.message);
+            std::process::exit(1);
+        }
+        return;
+    }
     if run_x11_clipboard_owner_if_requested() {
         return;
     }

@@ -225,7 +225,7 @@ fn run_server(
             )
         })?
         .block_on(async move {
-            let server = ServiceServer::bind_with_backend(
+            let server = ServiceServer::bind_with_isolated_backend(
                 options.endpoint_path,
                 options.data_directory,
                 service_version,

@@ -6,6 +6,7 @@ use std::{
 
 use image::{DynamicImage, ImageFormat, RgbaImage};
 
+use crate::snapshot::{BackendClipboardCaptureSource, ClipboardCapture, ClipboardCaptureSource};
 use crate::{ClipboardImage, ClipboardService, ServiceError};
 
 #[derive(Clone)]
@@ -33,20 +34,29 @@ impl ClipboardRuntime {
         if !settings.capture_enabled {
             return Ok(ClipboardRuntimeTick::default());
         }
-        let files = self
-            .service
-            .backend
-            .read_files()
-            .map_err(clipboard_read_failed)?
-            .filter(|paths| !paths.is_empty());
-        let textual_state = if let Some(paths) = files {
+        let source = BackendClipboardCaptureSource::new(Arc::clone(&self.service.backend));
+        self.tick_capture(source.capture()?, settings.retention_limit)
+    }
+
+    pub(crate) fn tick_with_source(
+        &self,
+        source: &dyn ClipboardCaptureSource,
+    ) -> Result<ClipboardRuntimeTick, ServiceError> {
+        let settings = self.service.store.load_settings()?;
+        if !settings.capture_enabled {
+            return Ok(ClipboardRuntimeTick::default());
+        }
+        self.tick_capture(source.capture()?, settings.retention_limit)
+    }
+
+    fn tick_capture(
+        &self,
+        capture: ClipboardCapture,
+        retention_limit: usize,
+    ) -> Result<ClipboardRuntimeTick, ServiceError> {
+        let textual_state = if let Some(paths) = capture.files {
             Some(TextualClipboardState::Files(paths))
-        } else if let Some(text) = self
-            .service
-            .backend
-            .read_text()
-            .map_err(clipboard_read_failed)?
-        {
+        } else if let Some(text) = capture.text {
             let paths = parse_absolute_file_paths(&text);
             Some(if paths.is_empty() {
                 TextualClipboardState::Text(text)
@@ -56,13 +66,7 @@ impl ClipboardRuntime {
         } else {
             None
         };
-        let image = self
-            .service
-            .backend
-            .read_image()
-            .map_err(clipboard_read_failed)?
-            .map(encode_png)
-            .transpose()?;
+        let image = capture.image.map(encode_png).transpose()?;
         let textual_changed = self
             .last_textual_state
             .lock()
@@ -97,19 +101,14 @@ impl ClipboardRuntime {
         })();
         if let Err(error) = insert_result {
             if inserted > 0 {
-                let retention_result = self
-                    .service
-                    .store
-                    .enforce_retention(settings.retention_limit);
+                let retention_result = self.service.store.enforce_retention(retention_limit);
                 self.service.emit_history_changed();
                 retention_result?;
             }
             return Err(error);
         }
         let deleted_by_retention = if inserted > 0 {
-            self.service
-                .store
-                .enforce_retention(settings.retention_limit)?
+            self.service.store.enforce_retention(retention_limit)?
         } else {
             0
         };
@@ -166,13 +165,6 @@ fn clipboard_image_invalid() -> ServiceError {
     ServiceError::new(
         "CLIPBOARD_SERVICE_CLIPBOARD_IMAGE_INVALID",
         "system clipboard image data is invalid",
-    )
-}
-
-fn clipboard_read_failed(_error: String) -> ServiceError {
-    ServiceError::new(
-        "CLIPBOARD_SERVICE_CLIPBOARD_READ_FAILED",
-        "cannot read the system clipboard",
     )
 }
 

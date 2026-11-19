@@ -17,9 +17,12 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
-    negotiate, write_endpoint, ClipboardBackend, ClipboardRuntime, ClipboardService, Endpoint,
-    ErrorEnvelope, ServiceError, ServiceHandshake, ServiceReply, ServiceRequest,
-    SystemClipboardBackend,
+    negotiate,
+    snapshot::{
+        BackendClipboardCaptureSource, ClipboardCaptureSource, ProcessClipboardCaptureSource,
+    },
+    write_endpoint, ClipboardBackend, ClipboardRuntime, ClipboardService, Endpoint, ErrorEnvelope,
+    ServiceError, ServiceHandshake, ServiceReply, ServiceRequest, SystemClipboardBackend,
 };
 
 const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
@@ -31,6 +34,7 @@ pub struct ServiceServer {
     token: String,
     service: ClipboardService,
     stop: Arc<Notify>,
+    capture_source: Arc<dyn ClipboardCaptureSource>,
     _lease: ServiceLease,
 }
 
@@ -44,7 +48,17 @@ impl ServiceServer {
             &data_directory,
             Arc::new(SystemClipboardBackend::new()),
         )?;
-        Self::bind_service(endpoint_path, data_directory, service_version, service).await
+        let source = Arc::new(BackendClipboardCaptureSource::new(Arc::clone(
+            &service.backend,
+        )));
+        Self::bind_service(
+            endpoint_path,
+            data_directory,
+            service_version,
+            service,
+            source,
+        )
+        .await
     }
 
     pub async fn bind_with_backend(
@@ -53,8 +67,34 @@ impl ServiceServer {
         service_version: impl Into<String>,
         backend: Arc<dyn ClipboardBackend>,
     ) -> Result<Self, ServiceError> {
+        let service = ClipboardService::open_with_backend(&data_directory, Arc::clone(&backend))?;
+        let source = Arc::new(BackendClipboardCaptureSource::new(backend));
+        Self::bind_service(
+            endpoint_path,
+            data_directory,
+            service_version,
+            service,
+            source,
+        )
+        .await
+    }
+
+    pub(crate) async fn bind_with_isolated_backend(
+        endpoint_path: PathBuf,
+        data_directory: PathBuf,
+        service_version: impl Into<String>,
+        backend: Arc<dyn ClipboardBackend>,
+    ) -> Result<Self, ServiceError> {
         let service = ClipboardService::open_with_backend(&data_directory, backend)?;
-        Self::bind_service(endpoint_path, data_directory, service_version, service).await
+        let source = Arc::new(ProcessClipboardCaptureSource::new(data_directory.clone())?);
+        Self::bind_service(
+            endpoint_path,
+            data_directory,
+            service_version,
+            service,
+            source,
+        )
+        .await
     }
 
     async fn bind_service(
@@ -62,6 +102,7 @@ impl ServiceServer {
         data_directory: PathBuf,
         service_version: impl Into<String>,
         service: ClipboardService,
+        capture_source: Arc<dyn ClipboardCaptureSource>,
     ) -> Result<Self, ServiceError> {
         fs::create_dir_all(&data_directory).map_err(|_| lease_error())?;
         let token = Uuid::new_v4().to_string();
@@ -92,6 +133,7 @@ impl ServiceServer {
             token,
             service,
             stop: Arc::new(Notify::new()),
+            capture_source,
             _lease: lease,
         })
     }
@@ -101,7 +143,10 @@ impl ServiceServer {
     }
 
     pub async fn run(self) -> Result<(), ServiceError> {
-        let _watcher = BackgroundWatcher::start(ClipboardRuntime::new(self.service.clone()));
+        let _watcher = BackgroundWatcher::start(
+            ClipboardRuntime::new(self.service.clone()),
+            Arc::clone(&self.capture_source),
+        );
         let mut connections = JoinSet::new();
         loop {
             tokio::select! {
@@ -134,22 +179,24 @@ struct BackgroundWatcher {
 }
 
 impl BackgroundWatcher {
-    fn start(runtime: ClipboardRuntime) -> Self {
+    fn start(runtime: ClipboardRuntime, source: Arc<dyn ClipboardCaptureSource>) -> Self {
         let (stop, stopped) = mpsc::channel();
         let thread = thread::spawn(move || {
             let mut last_error = None;
             loop {
                 match stopped.recv_timeout(Duration::from_millis(800)) {
                     Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                    Err(mpsc::RecvTimeoutError::Timeout) => match runtime.tick() {
-                        Ok(_) => last_error = None,
-                        Err(error) => {
-                            if last_error != Some(error.code) {
-                                eprintln!("{}: {}", error.code, error.message);
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        match runtime.tick_with_source(source.as_ref()) {
+                            Ok(_) => last_error = None,
+                            Err(error) => {
+                                if last_error != Some(error.code) {
+                                    eprintln!("{}: {}", error.code, error.message);
+                                }
+                                last_error = Some(error.code);
                             }
-                            last_error = Some(error.code);
                         }
-                    },
+                    }
                 }
             }
         });
