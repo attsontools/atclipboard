@@ -110,7 +110,7 @@ onUnmounted(() => {
 
 <template>
   <div class="app-root">
-    <header class="appbar">
+    <header v-if="adapter.mode === 'standalone'" class="appbar">
       <div class="appbar__identity">
         <h1>剪贴板</h1>
         <span class="appbar__count">{{ totalLabel }}</span>
@@ -128,7 +128,23 @@ onUnmounted(() => {
 
     <main class="app-content">
       <section class="section-band" aria-labelledby="settings-title">
-        <h2 id="settings-title" class="section-title">采集设置</h2>
+        <div class="section-heading">
+          <h2 id="settings-title" class="section-title">
+            采集设置
+            <span v-if="adapter.mode === 'plugin'" class="section-count">{{ totalLabel }}</span>
+          </h2>
+          <button
+            v-if="adapter.mode === 'plugin'"
+            class="button button--icon button--ghost"
+            type="button"
+            title="刷新"
+            aria-label="刷新"
+            :disabled="store.loading.value"
+            @click="store.refresh"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6v5h-5M4 18v-5h5M6.2 8.8A7 7 0 0 1 18.5 7L20 9M4 15l1.5 2A7 7 0 0 0 17.8 15.2"/></svg>
+          </button>
+        </div>
         <div class="settings-row">
           <div class="settings-field">
             <label class="switch" title="启用剪贴板采集">
